@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="300" viewBox="0 0 640 300" fill="none" role="img">
+  <title>Kolors panel: prompt and parameters on the left, the generated picture on the right</title>
+  <defs>
+    <clipPath id="dshkShotStage">
+      <rect x="326" y="26" width="288" height="204" rx="12"/>
+    </clipPath>
+    <linearGradient id="dshkShotSky" x1="326" y1="26" x2="326" y2="230" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#16303f"/>
+      <stop offset="0.62" stop-color="#3c5f66"/>
+      <stop offset="1" stop-color="#b86c45"/>
+    </linearGradient>
+    <linearGradient id="dshkShotGlow" x1="470" y1="96" x2="470" y2="168" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffd7a1" stop-opacity="0.95"/>
+      <stop offset="1" stop-color="#e08a4e" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Left column: the prompt and its parameters -->
+  <rect x="26" y="22" width="274" height="256" rx="14" stroke="#8a94a6" stroke-opacity="0.55"/>
+  <rect x="42" y="38" width="242" height="86" rx="9" stroke="#8a94a6" stroke-opacity="0.5" fill="#8a94a6" fill-opacity="0.07"/>
+  <rect x="56" y="54" width="196" height="7" rx="3.5" fill="#8a94a6" fill-opacity="0.62"/>
+  <rect x="56" y="70" width="212" height="7" rx="3.5" fill="#8a94a6" fill-opacity="0.48"/>
+  <rect x="56" y="86" width="150" height="7" rx="3.5" fill="#8a94a6" fill-opacity="0.34"/>
+  <rect x="56" y="102" width="118" height="7" rx="3.5" fill="#8a94a6" fill-opacity="0.2"/>
+
+  <!-- Five canvases, each drawn at its real ratio; the first is selected -->
+  <rect x="42" y="140" width="43" height="52" rx="8" fill="#2f6f5e" fill-opacity="0.16" stroke="#2f6f5e" stroke-width="1.6"/>
+  <rect x="54.5" y="152" width="18" height="18" rx="2.5" stroke="#2f6f5e" stroke-width="1.6"/>
+  <rect x="91" y="140" width="43" height="52" rx="8" stroke="#8a94a6" stroke-opacity="0.5"/>
+  <rect x="105" y="152" width="15" height="20" rx="2.5" stroke="#8a94a6" stroke-opacity="0.7" stroke-width="1.5"/>
+  <rect x="140" y="140" width="43" height="52" rx="8" stroke="#8a94a6" stroke-opacity="0.5"/>
+  <rect x="154" y="155" width="13" height="17" rx="2.5" stroke="#8a94a6" stroke-opacity="0.7" stroke-width="1.5"/>
+  <rect x="189" y="140" width="43" height="52" rx="8" stroke="#8a94a6" stroke-opacity="0.5"/>
+  <rect x="204" y="152" width="11" height="22" rx="2.5" stroke="#8a94a6" stroke-opacity="0.7" stroke-width="1.5"/>
+  <rect x="238" y="140" width="43" height="52" rx="8" stroke="#8a94a6" stroke-opacity="0.5"/>
+  <rect x="253" y="152" width="12" height="20" rx="2.5" stroke="#8a94a6" stroke-opacity="0.7" stroke-width="1.5"/>
+
+  <!-- Two sliders and one switch -->
+  <rect x="42" y="212" width="242" height="5" rx="2.5" fill="#8a94a6" fill-opacity="0.24"/>
+  <rect x="42" y="212" width="96" height="5" rx="2.5" fill="#2f6f5e" fill-opacity="0.75"/>
+  <circle cx="138" cy="214.5" r="6.5" fill="#2f6f5e"/>
+  <rect x="42" y="238" width="242" height="5" rx="2.5" fill="#8a94a6" fill-opacity="0.24"/>
+  <rect x="42" y="238" width="168" height="5" rx="2.5" fill="#2f6f5e" fill-opacity="0.75"/>
+  <circle cx="210" cy="240.5" r="6.5" fill="#2f6f5e"/>
+  <rect x="42" y="258" width="36" height="19" rx="9.5" fill="#2f6f5e" fill-opacity="0.22"/>
+  <circle cx="68" cy="267.5" r="6.5" fill="#2f6f5e"/>
+  <rect x="90" y="263" width="86" height="7" rx="3.5" fill="#8a94a6" fill-opacity="0.34"/>
+
+  <!-- Right column: one generated picture, the way the panel shows it -->
+  <rect x="326" y="26" width="288" height="204" rx="12" fill="url(#dshkShotSky)"/>
+  <g clip-path="url(#dshkShotStage)">
+    <rect x="326" y="96" width="288" height="134" fill="url(#dshkShotGlow)"/>
+    <circle cx="470" cy="108" r="26" fill="#ffd9a8" fill-opacity="0.92"/>
+    <path d="M326 156l58-30 46 26 40-34 52 40 44-22 76 38v56H326z" fill="#20454a" fill-opacity="0.92"/>
+    <path d="M326 186l70-24 54 22 62-18 74 26v38H326z" fill="#122e33" fill-opacity="0.95"/>
+    <path d="M326 214h288v20H326z" fill="#0d2226" fill-opacity="0.7"/>
+    <path d="M470 218l-22 14h44z" fill="#e8a86a" fill-opacity="0.5"/>
+  </g>
+  <rect x="326" y="26" width="288" height="204" rx="12" stroke="#8a94a6" stroke-opacity="0.5"/>
+
+  <!-- The pair of actions under the picture: save, and the way out -->
+  <rect x="326" y="246" width="82" height="32" rx="16" fill="#2f6f5e"/>
+  <rect x="346" y="259" width="42" height="6" rx="3" fill="#f2f5f4" fill-opacity="0.9"/>
+  <rect x="418" y="246" width="82" height="32" rx="16" stroke="#8a94a6" stroke-opacity="0.6"/>
+  <rect x="438" y="259" width="42" height="6" rx="3" fill="#8a94a6" fill-opacity="0.55"/>
+  <rect x="516" y="246" width="98" height="32" rx="16" stroke="#8a94a6" stroke-opacity="0.35"/>
+  <rect x="536" y="259" width="58" height="6" rx="3" fill="#8a94a6" fill-opacity="0.36"/>
+</svg>

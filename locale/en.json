@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Kolors Image",
+    "description": "A sidebar page that draws with the free Kwai-Kolors/Kolors model on SiliconFlow; the model is fixed and cannot be swapped. The Generate tab has a prompt, five canvases (each with a to-scale diagram), inference steps, prompt adherence, a negative prompt, a seed, and an explicit-watermark switch (off by default). A finished picture can be saved into <output>/dsh-kolors-image/, downloaded, copied as a file path, or deleted. The History tab filters by the last 1, 3, 7, or 30 days or everything, with multi-select delete, zoom with arrow-key paging, reuse-settings, and copy-prompt; the trash restores, deletes forever, or empties at once. The Settings tab manages the key pool (several keys, each with its own allowance) and the picture folder. Each key allows 2 pictures a minute and 400 a day; the plugin enforces that locally, counts on disk across restarts, and refuses instead of queueing. Keys are written only to ~/.dsh/secrets/kolors.env (mode 600) on this machine and never uploaded. An unsaved picture stays on the Generate page across tab and page switches and is cleared when the app is fully closed. Also registers a kolors_image tool so the model can draw in a conversation, over the same allowance and the same folder. Turning the plugin off removes the tool and the sidebar entry; saved pictures stay on disk.",
+    "detail": "docs/DETAIL.md"
+  }
+}
