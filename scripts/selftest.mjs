@@ -139,7 +139,7 @@ console.log('\n[settings]')
 
   const clamped = await call('POST', '/settings', { params: { size: 'nope', steps: 500, guidance: 99 } })
   check('unknown canvas falls back to 1024x1024', clamped.body.params.size === '1024x1024', clamped.body.params.size)
-  check('steps clamp to 100', clamped.body.params.steps === 100, clamped.body.params.steps)
+  check('steps clamp to 50', clamped.body.params.steps === 50, clamped.body.params.steps)
   check('guidance clamps to 20', clamped.body.params.guidance === 20, clamped.body.params.guidance)
 
   const relative = await call('POST', '/settings', { outputDir: 'Pictures' })

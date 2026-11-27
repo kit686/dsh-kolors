@@ -69,6 +69,14 @@ const DEFAULT_PARAMS = {
   watermark: false,
 }
 
+/**
+ * Upstream refuses anything above 50 with `code 20015: num_inference_steps:
+ * Must be less than or equal to 50`, so the ceiling is enforced here rather
+ * than discovered after a wasted round trip. Measured against the live API:
+ * 50 answers 200, 51 is rejected.
+ */
+export const MAX_STEPS = 50
+
 /** Error carrying the HTTP status the panel should read. */
 class PanelError extends Error {
   constructor(status, message) {
@@ -265,9 +273,19 @@ function readSettings() {
     parsed = {}
   }
   const requestedDays = Number(parsed.historyDays)
+  const stored = typeof parsed.params === 'object' && parsed.params !== null ? parsed.params : {}
   const settings = {
     outputDir: outputDirOf(parsed),
-    params: { ...DEFAULT_PARAMS, ...(typeof parsed.params === 'object' && parsed.params !== null ? parsed.params : {}) },
+    // Re-clamp on read, not only on write: a config saved by an older build can
+    // hold a step count the upstream now refuses, and merging it verbatim would
+    // carry that refusal into every later run.
+    params: {
+      ...DEFAULT_PARAMS,
+      ...stored,
+      size: sizeOf(String(stored.size ?? DEFAULT_PARAMS.size)).id,
+      steps: Math.round(clamp(stored.steps, 1, MAX_STEPS, DEFAULT_PARAMS.steps)),
+      guidance: clamp(stored.guidance, 0.1, 20, DEFAULT_PARAMS.guidance),
+    },
     keys: Array.isArray(parsed.keys) ? parsed.keys.filter((key) => key !== null && typeof key === 'object') : [],
     usage: typeof parsed.usage === 'object' && parsed.usage !== null ? parsed.usage : {},
     // 0 means "everything", which is a real choice and not a missing value.
@@ -415,7 +433,7 @@ function requestOf(input) {
   if (prompt === '') throw new PanelError(400, '提示词不能为空。')
   const size = sizeOf(String(input?.size ?? ''));
   const negative = String(input?.negative_prompt ?? '').trim()
-  const steps = Math.round(clamp(input?.steps, 1, 100, DEFAULT_PARAMS.steps))
+  const steps = Math.round(clamp(input?.steps, 1, MAX_STEPS, DEFAULT_PARAMS.steps))
   const guidance = clamp(input?.guidance, 0.1, 20, DEFAULT_PARAMS.guidance)
   const seedInput = input?.seed
   const seed = seedInput === undefined || seedInput === null || String(seedInput).trim() === ''
@@ -969,7 +987,7 @@ function settingsAction(input) {
   if (typeof input?.params === 'object' && input.params !== null) {
     settings.params = {
       size: sizeOf(String(input.params.size ?? settings.params.size)).id,
-      steps: Math.round(clamp(input.params.steps, 1, 100, settings.params.steps)),
+      steps: Math.round(clamp(input.params.steps, 1, MAX_STEPS, settings.params.steps)),
       guidance: clamp(input.params.guidance, 0.1, 20, settings.params.guidance),
       negative: String(input.params.negative ?? settings.params.negative ?? '').slice(0, 2000),
       watermark: input.params.watermark === true,
@@ -1198,7 +1216,7 @@ function toolDefinition(ctx) {
           enum: SIZES.map((size) => size.id),
         },
         negative_prompt: { type: 'string', description: 'What must not appear in the picture.' },
-        steps: { type: 'integer', description: 'Inference steps, 1-100; default 20. Higher is slower and usually finer.' },
+        steps: { type: 'integer', description: 'Inference steps, 1-50; default 20. Higher is slower and usually finer.' },
         guidance: { type: 'number', description: 'Prompt adherence 0.1-20; default 7.5. Higher sticks closer to the prompt.' },
         seed: { type: 'integer', description: 'Random seed; omit for a fresh one. Reuse it to repeat a composition.' },
         watermark: { type: 'boolean', description: 'Draw the explicit "AI generated" watermark; default false (off).' },
