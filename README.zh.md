@@ -2,7 +2,9 @@
 
 [English](README.en.md)
 
-DeepSeek Harness 侧栏插件：用硅基流动免费的 `Kwai-Kolors/Kolors` 出图。
+免费生图，装在 DeepSeek Harness 侧栏里。直接用硅基流动免费的 `Kwai-Kolors/Kolors`，不收费、不加水印、不绑模型选择。
+
+完全免费：Kolors 本身不收费，插件也不收任何费用。唯一要求是硅基流动账户余额 ≥ 0（平台门槛，不是付费）。
 
 ![生图页](docs/screenshot-1.png)
 

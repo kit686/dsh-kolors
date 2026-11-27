@@ -1,6 +1,8 @@
 # dsh-kolors
 
-A sidebar plugin for DeepSeek Harness: draw pictures with the free `Kwai-Kolors/Kolors` model on SiliconFlow.
+Free image generation, built into the DeepSeek Harness sidebar. It runs the free `Kwai-Kolors/Kolors` model on SiliconFlow: no charge, no watermark, no model picker.
+
+Completely free: Kolors itself costs nothing and this plugin charges nothing. The only requirement is a SiliconFlow balance ≥ 0, which is the platform's gate rather than a fee.
 
 ![The generate page](docs/screenshot-1.png)
 
