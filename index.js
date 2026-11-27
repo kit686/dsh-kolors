@@ -20,7 +20,7 @@
  * @module dsh-kolors
  */
 
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 
@@ -42,6 +42,9 @@ const DAY_LIMIT = 400
 
 /** The history page shows this many days back by default. */
 const HISTORY_DAYS = 7
+
+/** How many rows one page of history or trash sends to the browser. */
+const HISTORY_PAGE_SIZE = 400
 
 /** Windows before the history page offers. */
 const HISTORY_WINDOWS = [1, 3, 7, 30, 0]
@@ -76,6 +79,24 @@ const DEFAULT_PARAMS = {
  * 50 answers 200, 51 is rejected.
  */
 export const MAX_STEPS = 50
+
+/**
+ * How much text one request may carry.
+ *
+ * Kolors itself takes a short caption, not an essay; these are ceilings that
+ * refuse an obviously abusive request before it costs a generation, and they sit
+ * far above any prompt a person types on purpose.
+ */
+const MAX_PROMPT_CHARS = 4000
+const MAX_NEGATIVE_CHARS = 2000
+
+/**
+ * Two separate deadlines: rendering and fetching the finished picture. They used
+ * to share one 180-second AbortSignal, so a generation that took 170 seconds left
+ * the download ten.
+ */
+const GENERATE_TIMEOUT_MS = 180_000
+const DOWNLOAD_TIMEOUT_MS = 60_000
 
 /** Error carrying the HTTP status the panel should read. */
 class PanelError extends Error {
@@ -244,9 +265,22 @@ function maskKey(value) {
 
 /* --------------------------------------------------------------- settings */
 
+/**
+ * Where pictures go when the user has not chosen a folder.
+ *
+ * `~/Pictures` is a Windows and macOS convention; on a bare Linux box it does
+ * not exist and creating it is presumptuous. The XDG pictures directory is only
+ * used when it really is there, and everything else falls back to the home
+ * directory itself, which every platform has.
+ */
 function outputDirOf(settings) {
   const raw = typeof settings.outputDir === 'string' ? settings.outputDir.trim() : ''
-  return raw === '' ? join(homedir(), 'Pictures') : raw
+  if (raw !== '') return raw
+  const pictures = join(homedir(), 'Pictures')
+  if (existsSync(pictures)) return pictures
+  const xdg = process.env.XDG_PICTURES_DIR
+  if (typeof xdg === 'string' && xdg !== '' && existsSync(xdg)) return xdg
+  return homedir()
 }
 
 function savedRoot(settings) {
@@ -431,8 +465,14 @@ function clamp(value, min, max, fallback) {
 function requestOf(input) {
   const prompt = String(input?.prompt ?? '').trim()
   if (prompt === '') throw new PanelError(400, '提示词不能为空。')
+  // The panel and the model tool are two independent callers; neither is
+  // trusted to bound its own input. The upstream truncates far below this, and a
+  // runaway prompt is the cheapest way to spend a request on a worthless image.
+  if (prompt.length > MAX_PROMPT_CHARS) {
+    throw new PanelError(400, `提示词太长了（${prompt.length} 字），上限 ${MAX_PROMPT_CHARS} 字。`)
+  }
   const size = sizeOf(String(input?.size ?? ''));
-  const negative = String(input?.negative_prompt ?? '').trim()
+  const negative = String(input?.negative_prompt ?? '').trim().slice(0, MAX_NEGATIVE_CHARS)
   const steps = Math.round(clamp(input?.steps, 1, MAX_STEPS, DEFAULT_PARAMS.steps))
   const guidance = clamp(input?.guidance, 0.1, 20, DEFAULT_PARAMS.guidance)
   const seedInput = input?.seed
@@ -511,7 +551,10 @@ async function generate(input, options = {}) {
   if (request.negative !== '') body.negative_prompt = request.negative
   if (request.seed !== undefined) body.seed = request.seed
 
-  const signal = options.signal ?? AbortSignal.timeout(180_000)
+  // The generation gets its own deadline. The download below gets a fresh one:
+  // sharing a single 180-second budget meant a slow generation left the download
+  // a few seconds to finish an already-paid-for picture, which then "failed".
+  const signal = options.signal ?? AbortSignal.timeout(GENERATE_TIMEOUT_MS)
   let payload
   try {
     const response = await fetch(API_URL, {
@@ -540,13 +583,21 @@ async function generate(input, options = {}) {
     payload = await response.json()
   } catch (error) {
     if (error instanceof PanelError) throw error
-    const later = readSettings()
-    refundUse(later, picked.key.id, now)
-    writeSettings(later)
-    const reason = error?.name === 'TimeoutError' || error?.name === 'AbortError'
-      ? '请求超时（180 秒），上游没有返回。'
+    const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError'
+    // A timeout does not prove the upstream spent nothing: it may well have
+    // rendered the picture and only been slow to answer. Returning the stamp
+    // would let the user retry, spend a real upstream slot, and then hit a 429
+    // the local meter said was impossible. Only refusals that provably cost
+    // nothing are refunded; a timeout keeps its stamp.
+    if (!timedOut) {
+      const later = readSettings()
+      refundUse(later, picked.key.id, now)
+      writeSettings(later)
+    }
+    const reason = timedOut
+      ? `请求超时（${GENERATE_TIMEOUT_MS / 1000} 秒），上游没有返回。额度先按已用计，等一分钟再试。`
       : `连不上硅基流动：${error?.message ?? error}`
-    throw new PanelError(502, reason)
+    throw new PanelError(504, reason)
   }
 
   const imageUrl = payload?.images?.[0]?.url
@@ -558,7 +609,9 @@ async function generate(input, options = {}) {
   }
   let bytes
   try {
-    bytes = await downloadImage(imageUrl, signal)
+    // Its own deadline, and it never inherits the caller's abort: the picture is
+    // already generated and paid for, so cancelling now would waste it.
+    bytes = await downloadImage(imageUrl, AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS))
   } catch (error) {
     throw new PanelError(502, error instanceof PanelError ? error.message : '图片下载失败，重试一次。')
   }
@@ -775,10 +828,36 @@ function moveToTrash(settings, source, input) {
     origin: String(input?.origin ?? 'preview'),
   }
   rows.push(record)
-  writeTrash(settings, rows.filter((row) => typeof row.path === 'string' && existsSync(row.path)).slice(-2000))
+  writeTrash(settings, pruneTrash(settings, rows))
   // The caller re-reads settings, so persist the cleared preview pointer here.
   writeSettings(settings)
   return record
+}
+
+/**
+ * The trash ceiling. Once it is reached the oldest entry is evicted, and
+ * eviction deletes the file as well as the row.
+ *
+ * Dropping only the index row used to leave the PNG on disk with nothing that
+ * named it: invisible in the panel, unreachable from the UI, and impossible to
+ * remove without opening the folder by hand. Every delete past the ceiling
+ * leaked one more file.
+ */
+const TRASH_LIMIT = 2000
+
+function pruneTrash(settings, rows) {
+  const alive = []
+  for (const row of rows) {
+    // A row whose file is gone cannot be restored or previewed.
+    if (typeof row.path !== 'string' || !existsSync(row.path)) continue
+    alive.push(row)
+  }
+  alive.sort((a, b) => Number(a.deletedAt ?? a.at ?? 0) - Number(b.deletedAt ?? b.at ?? 0))
+  const evicted = alive.length > TRASH_LIMIT ? alive.splice(0, alive.length - TRASH_LIMIT) : []
+  for (const row of evicted) {
+    try { rmSync(row.path, { force: true }) } catch { /* the row still goes */ }
+  }
+  return alive
 }
 
 /** The saved pictures inside one time window; 0 days means everything. */
@@ -786,20 +865,28 @@ function history(days) {
   const settings = readSettings()
   const wanted = HISTORY_WINDOWS.includes(Number(days)) ? Number(days) : settings.historyDays
   const since = wanted === 0 ? 0 : Date.now() - wanted * 86_400_000
-  const rows = readIndex(settings)
+  // Filter by the window first — it is pure arithmetic — then stat only the
+  // rows that can still reach the page. Checking every row in the index meant
+  // thousands of synchronous statSync calls per history read, on the event loop.
+  const inWindow = readIndex(settings)
     .filter((row) => typeof row.at === 'number' && row.at >= since)
-    .filter((row) => typeof row.path === 'string' && existsSync(row.path))
     .sort((a, b) => b.at - a.at)
+  const alive = []
+  for (const row of inWindow) {
+    if (alive.length === HISTORY_PAGE_SIZE) break
+    if (typeof row.path !== 'string' || !existsSync(row.path)) continue
+    alive.push(row)
+  }
   // The page shows a bounded window; say so instead of silently dropping rows.
-  const items = rows.slice(0, 400).map((row) => ({ ...row, src: savedUrl(row.path) }))
+  const items = alive.map((row) => ({ ...row, src: savedUrl(row.path) }))
   return {
     ok: true,
     days: wanted,
     windows: HISTORY_WINDOWS,
     folder: savedRoot(settings),
     items,
-    total: rows.length,
-    truncated: rows.length > items.length,
+    total: inWindow.length,
+    truncated: inWindow.length > items.length,
   }
 }
 
@@ -825,12 +912,17 @@ function deleteSaved(input) {
 function trash() {
   const settings = readSettings()
   const rows = readTrash(settings)
-  const alive = rows
-    .filter((row) => typeof row.path === 'string' && existsSync(row.path))
     .sort((a, b) => (b.deletedAt ?? 0) - (a.deletedAt ?? 0))
-  if (alive.length !== rows.length) writeTrash(settings, alive)
-  const items = alive.slice(0, 400).map((row) => ({ ...row, src: trashUrl(row.path) }))
-  return { ok: true, folder: trashRoot(settings), items, total: alive.length, truncated: alive.length > items.length }
+  // Sort first, then stat only the rows that can reach the page — same reason as
+  // in history(): statSync is synchronous and this runs on the event loop.
+  const alive = []
+  for (const row of rows) {
+    if (alive.length === HISTORY_PAGE_SIZE) break
+    if (typeof row.path !== 'string' || !existsSync(row.path)) continue
+    alive.push(row)
+  }
+  const items = alive.map((row) => ({ ...row, src: trashUrl(row.path) }))
+  return { ok: true, folder: trashRoot(settings), items, total: rows.length, truncated: rows.length > items.length }
 }
 
 /** Put one trashed picture back into the save folder. */
@@ -1051,12 +1143,40 @@ function originAllowed(req) {
   }
 }
 
+/**
+ * The largest RPC body this panel accepts.
+ *
+ * The only bulk field is a prompt or a negative prompt; 1 MiB is far beyond any
+ * useful prompt (roughly 350k Chinese characters) and keeps a runaway caller
+ * from turning the body reader into a memory amplifier.
+ */
+const MAX_BODY_BYTES = 1024 * 1024
+
+/**
+ * Read one JSON body.
+ *
+ * The chunks are concatenated as buffers, never decoded one at a time: a TCP
+ * segment boundary lands wherever it likes, and `String(chunk)` on each piece
+ * splits a multi-byte character across two decodes. Each half then becomes
+ * U+FFFD, so a long Chinese prompt silently arrived at the model with mojibake
+ * in it — measured at roughly 22k Chinese characters, where the body first
+ * spans more than one 64 KiB read. Decoding once, after the whole body is in
+ * hand, cannot split a character.
+ */
 async function readBody(req) {
-  let raw = ''
-  for await (const chunk of req) raw += String(chunk)
-  if (raw === '') return {}
+  const chunks = []
+  let total = 0
+  for await (const chunk of req) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8')
+    total += bytes.length
+    // Refuse rather than buffer without bound; the caller is not a browser the
+    // user is watching, so a silent OOM would be the worst outcome.
+    if (total > MAX_BODY_BYTES) throw new PanelError(413, `请求体超过 ${MAX_BODY_BYTES} 字节。`)
+    chunks.push(bytes)
+  }
+  if (total === 0) return {}
   try {
-    const parsed = JSON.parse(raw)
+    const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'))
     return parsed !== null && typeof parsed === 'object' ? parsed : {}
   } catch {
     return {}
@@ -1073,20 +1193,68 @@ function sendJson(res, status, value) {
   res.end(body)
 }
 
-/** Stream one picture, but only from the folder its route owns. */
-function sendFile(res, root, rawPath, mediaType = 'image/png') {
+/**
+ * Stream one picture, but only from the folder its route owns.
+ *
+ * Two things matter here and neither is decoration:
+ *
+ * - The bytes are piped, not read into a Buffer. The history page can ask for
+ *   hundreds of multi-megabyte PNGs at once, and `readFileSync` would hold every
+ *   one of them in the Host's heap simultaneously.
+ * - The response carries a validator. The panel re-fetches the same pictures on
+ *   every tab switch, and a picture never changes once written, so `ETag` +
+ *   `If-None-Match` turns those re-reads into 304s with no body at all.
+ *
+ * `no-store` is deliberately gone: with an ETag the browser may keep its own
+ * copy, and a 304 still revalidates it, so a deleted picture stops being served
+ * rather than being shown from a stale cache forever.
+ */
+function sendFile(req, res, root, rawPath, mediaType = 'image/png') {
   const target = rawPath === null ? '' : rawPath
   if (target === '' || !insidePath(root, target)) {
     sendJson(res, 403, { ok: false, message: 'path outside the picture folder' })
     return
   }
-  let size = 0
-  try { size = statSync(target).size } catch {
+  let info
+  try {
+    info = statSync(target)
+  } catch {
     sendJson(res, 404, { ok: false, message: '图片不在了' })
     return
   }
-  res.writeHead(200, { 'content-type': mediaType, 'content-length': size, 'cache-control': 'no-store' })
-  res.end(readFileSync(target))
+  if (!info.isFile()) {
+    sendJson(res, 404, { ok: false, message: '图片不在了' })
+    return
+  }
+  // Size and mtime identify the bytes: the plugin writes a file once, under a
+  // random name, and never rewrites it.
+  const etag = `"${info.size.toString(16)}-${Math.floor(info.mtimeMs).toString(16)}"`
+  if (req?.headers?.['if-none-match'] === etag) {
+    res.writeHead(304, { etag, 'cache-control': 'private, max-age=0, must-revalidate' })
+    res.end()
+    return
+  }
+  res.writeHead(200, {
+    'content-type': mediaType,
+    'content-length': info.size,
+    etag,
+    'cache-control': 'private, max-age=0, must-revalidate',
+  })
+  if (req === undefined) {
+    // A caller without a request object cannot revalidate, so it gets the bytes.
+    res.end(readFileSync(target))
+    return
+  }
+  const stream = createReadStream(target)
+  stream.on('error', () => {
+    // The headers are already out; the only honest signal left is to cut the
+    // connection so the browser does not treat a short body as the whole file.
+    res.destroy()
+  })
+  // A client that navigates away mid-transfer leaves a half-consumed stream;
+  // close it rather than waiting for the descriptor to be collected.
+  res.on('close', () => { stream.destroy() })
+  stream.pipe(res)
 }
 
 /** The `/kolors` prefix handler: panel RPC plus the picture streams. */
@@ -1114,15 +1282,15 @@ export function createHandler() {
         return
       }
       if (route === '/frame' && method === 'GET') {
-        sendFile(res, frameDir(), url.searchParams.get('p'))
+        sendFile(req, res, frameDir(), url.searchParams.get('p'))
         return
       }
       if (route === '/saved' && method === 'GET') {
-        sendFile(res, savedRoot(readSettings()), url.searchParams.get('p'))
+        sendFile(req, res, savedRoot(readSettings()), url.searchParams.get('p'))
         return
       }
       if (route === '/trash-file' && method === 'GET') {
-        sendFile(res, trashRoot(readSettings()), url.searchParams.get('p'))
+        sendFile(req, res, trashRoot(readSettings()), url.searchParams.get('p'))
         return
       }
       if (method === 'POST') {

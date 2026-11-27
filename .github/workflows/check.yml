@@ -1,0 +1,38 @@
+name: check
+
+# The plugin ships an offline suite (selftest, clientaudit, tabswitch, pathcheck).
+# Until this workflow existed nothing ran it but the author's own machine, so a
+# pull request could break the panel and still look green.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # The suite has no dependencies on purpose: it imports the bundle directly
+      # and stands in for React, so there is nothing to install.
+      - name: Syntax and offline suite
+        run: npm run check
+
+      - name: The bundle declares a patch layer
+        run: |
+          node -e "
+            const pkg = require('./package.json');
+            const assert = require('node:assert');
+            assert.ok(pkg.dsh?.bundle?.patch, 'dsh.bundle.patch is required to install');
+            assert.ok(pkg.dsh?.client, 'dsh.client makes the browser half load');
+            assert.ok(require('node:fs').existsSync(pkg.dsh.bundle.patch), 'the patch file must exist');
+            console.log('bundle manifest ok');
+          "

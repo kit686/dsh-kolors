@@ -5,9 +5,9 @@
  *
  * Run with: node scripts/selftest.mjs
  */
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const home = mkdtempSync(join(tmpdir(), 'kolors-home-'))
@@ -37,19 +37,37 @@ function req(method, url, body) {
   }
 }
 
-/** A fake ServerResponse that records status and body. */
+/**
+ * A fake ServerResponse that records status and body.
+ *
+ * `sendFile` pipes a read stream into the response now, so this has to behave
+ * like a writable: `pipe()` needs `on('error')`, `write()`, `end()` and
+ * `once('close')` at minimum. `binary` records the raw bytes so a picture can be
+ * compared byte for byte instead of through a lossy string.
+ */
 function res() {
-  const state = { status: 0, headers: {}, body: '', chunks: [] }
-  return {
+  const state = { status: 0, headers: {}, body: '', chunks: [], destroyed: false }
+  const emitter = {
     state,
     writeHead(status, headers) { state.status = status; Object.assign(state.headers, headers ?? {}) },
     end(value) {
-      if (value === undefined) { state.body = ''; return }
-      if (typeof value === 'string' || Buffer.isBuffer(value)) state.body = String(value)
-      else { state.body = Buffer.concat(state.chunks).toString('binary') }
+      if (value === undefined || value === null) { state.body = Buffer.concat(state.chunks); return }
+      if (typeof value === 'string') { state.chunks.push(Buffer.from(value, 'utf8')); state.body = value; return }
+      if (Buffer.isBuffer(value)) { state.chunks.push(value); state.body = value.toString('binary'); return }
+      state.body = Buffer.concat(state.chunks).toString('binary')
     },
     write(chunk) { state.chunks.push(Buffer.from(chunk)); return true },
+    destroy() { state.destroyed = true },
+    on() { return emitter },
+    once() { return emitter },
+    emit() { return true },
+    removeListener() { return emitter },
+    // Enough of the writable side for `readable.pipe()` to finish and clean up.
+    writable: true,
+    destroyed: false,
+    emitClose() {},
   }
+  return emitter
 }
 
 const handler = createHandler()
@@ -59,6 +77,11 @@ async function call(method, path, body) {
   let parsed
   try { parsed = JSON.parse(response.state.body) } catch { parsed = undefined }
   return { status: response.state.status, headers: response.state.headers, body: parsed, raw: response.state }
+}
+
+/** The save folder for a given settings row, without reaching into the module. */
+function savedRootOf(settings) {
+  return join(settings.outputDir, 'dsh-kolors-image')
 }
 
 /** The Host's own boot id, read through the public state route. */
@@ -439,6 +462,122 @@ console.log('\n[tool output rendering]')
     { path: 'x', size: '1024x1024', prompt: 'a cat', minuteLeft: 1, dayLeft: 399, image: { attachmentId: 'a', mediaType: 'image/png', bytes: 1, width: 8, height: 8 } },
   )
   check('an accepted attachment adds an image block', withImage.length === 2 && withImage[1].type === 'image')
+}
+
+/* --------------------------------------------------- body decoding limits */
+
+console.log('\n[request body decoding]')
+{
+  // The bug this guards: readBody used to decode each TCP chunk on its own, so a
+  // multi-byte character split across two chunks became two U+FFFD replacement
+  // characters. A Chinese prompt over ~22k characters hit it in practice.
+  //
+  // This probes the decoder directly through the real route handler by using a
+  // route that echoes the parsed body without touching the network: an unknown
+  // POST route parses the body first and then answers 404.
+  const longChinese = '雨'.repeat(3000)
+  const encoded = Buffer.from(JSON.stringify({ prompt: longChinese }), 'utf8')
+  const cut = encoded.indexOf(Buffer.from('雨', 'utf8')) + 1
+  const streamed = {
+    method: 'POST',
+    url: '/kolors/__echo-probe',
+    headers: { host: '127.0.0.1:4969' },
+    async *[Symbol.asyncIterator]() {
+      yield encoded.subarray(0, cut)
+      yield encoded.subarray(cut)
+    },
+  }
+  const response = res()
+  await handler(streamed, response)
+  // A body that decodes to invalid JSON collapses to {} and the route still 404s,
+  // so the proof has to come from the decoder itself.
+  const decode = (pieces) => Buffer.concat(pieces).toString('utf8')
+  const intact = decode([encoded.subarray(0, cut), encoded.subarray(cut)])
+  const split = String(encoded.subarray(0, cut)) + String(encoded.subarray(cut))
+  check('the route answered at all', response.state.status === 404, response.state.status)
+  check('the probe really splits a character', split.includes('\uFFFD'), 'the fixture is not exercising the bug')
+  check('decoding once at the end keeps the text', intact === encoded.toString('utf8') && !intact.includes('\uFFFD'))
+  check('decoding per chunk is what corrupts it', split !== intact)
+  // And the shipped reader must be the one that decodes once.
+  const source = readFileSync(join(import.meta.dirname, '..', 'index.js'), 'utf8')
+  check('readBody concatenates before decoding', /Buffer\.concat\(chunks\)\.toString\('utf8'\)/.test(source))
+  check('readBody no longer stringifies each chunk', !/raw \+= String\(chunk\)/.test(source))
+  check('readBody refuses an oversized body', /MAX_BODY_BYTES/.test(source))
+}
+
+console.log('\n[prompt bounds]')
+{
+  const tooLong = await call('POST', '/generate', { prompt: '雨'.repeat(5000) })
+  check('an absurd prompt is refused before it costs a generation', tooLong.status === 400, tooLong.status)
+  check('the refusal names the ceiling', /4000/.test(String(tooLong.body?.message ?? '')), tooLong.body?.message)
+  const okLength = await call('POST', '/generate', { prompt: '雨'.repeat(3000) })
+  check('a long but reasonable prompt is not refused for length', okLength.status !== 400 || !/太长/.test(String(okLength.body?.message ?? '')), okLength.body?.message)
+}
+
+console.log('\n[trash ceiling]')
+{
+  // Build a trash at exactly the ceiling, then push one more through. The oldest
+  // file must be deleted from disk, not merely dropped from the index: an orphan
+  // PNG is invisible in the panel and unremovable from the UI.
+  const settingsPath = join(home, 'dsh-kolors.json')
+  const now = JSON.parse(readFileSync(settingsPath, 'utf8'))
+  const trashDir = join(savedRootOf(now), 'dsh-kolors-trash')
+  mkdirSync(trashDir, { recursive: true })
+  const rows = []
+  for (let i = 0; i < 2000; i += 1) {
+    const file = join(trashDir, `filler-${String(i).padStart(4, '0')}.png`)
+    writeFileSync(file, 'x')
+    rows.push({ id: `t${i}`, name: `filler-${i}.png`, path: file, src: '/k', prompt: 'p', at: Date.now() + i, deletedAt: Date.now() + i })
+  }
+  writeFileSync(join(trashDir, 'index.json'), JSON.stringify(rows))
+  mkdirSync(join(home, 'kolors-frames'), { recursive: true })
+  const frame = join(home, 'kolors-frames', 'ceiling.png')
+  writeFileSync(frame, 'y')
+  const before = readdirSync(trashDir).filter((name) => name.endsWith('.png')).length
+  const pushed = await call('POST', '/discard', { file: frame, prompt: '第2001张' })
+  const after = readdirSync(trashDir).filter((name) => name.endsWith('.png')).length
+  const index = JSON.parse(readFileSync(join(trashDir, 'index.json'), 'utf8'))
+  check('discarding past the ceiling succeeds', pushed.status === 200, pushed.status)
+  check('the index stops at the ceiling', index.length === 2000, index.length)
+  check('the disk stops at the ceiling too', after === 2000, `${before} -> ${after}`)
+  check('no orphan picture is left behind', after === index.length, `disk ${after} vs index ${index.length}`)
+}
+
+console.log('\n[image streaming]')
+{
+  const target = join(savedRootOf(JSON.parse(readFileSync(join(home, 'dsh-kolors.json'), 'utf8'))), 'stream-test.png')
+  mkdirSync(dirname(target), { recursive: true })
+  writeFileSync(target, Buffer.alloc(2048, 7))
+  const first = await call('GET', `/saved?p=${encodeURIComponent(target)}`)
+  check('the picture is served', first.status === 200, first.status)
+  check('it is typed as a picture', first.headers['content-type'] === 'image/png', first.headers['content-type'])
+  check('the response carries a validator', typeof first.headers.etag === 'string' && first.headers.etag.length > 2, first.headers.etag)
+  check('the exact byte count is announced', Number(first.headers['content-length']) === 2048, first.headers['content-length'])
+  // A second read with the validator must not send the bytes again.
+  const again = res()
+  await handler({
+    method: 'GET',
+    url: `/kolors/saved?p=${encodeURIComponent(target)}`,
+    headers: { host: '127.0.0.1:4969', 'if-none-match': first.headers.etag },
+    async *[Symbol.asyncIterator]() {},
+  }, again)
+  check('an unchanged picture answers 304', again.state.status === 304, again.state.status)
+  check('a 304 carries no body', again.state.chunks.length === 0, again.state.chunks.length)
+  rmSync(target, { force: true })
+}
+
+console.log('\n[output folder fallback]')
+{
+  // ~/Pictures is a Windows/macOS convention. On a box without it the plugin must
+  // not invent one; it falls back to the home directory, which always exists.
+  const previous = process.env.HOME
+  const bare = mkdtempSync(join(tmpdir(), 'kolors-bare-'))
+  writeFileSync(join(home, 'dsh-kolors.json'), JSON.stringify({ outputDir: '' }))
+  const state = await call('GET', '/state')
+  check('an empty setting still yields a usable folder', typeof state.body.outputDir === 'string' && state.body.outputDir !== '', state.body.outputDir)
+  check('the folder it names actually exists', existsSync(state.body.outputDir), state.body.outputDir)
+  rmSync(bare, { recursive: true, force: true })
+  if (previous !== undefined) process.env.HOME = previous
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`)

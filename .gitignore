@@ -3,3 +3,11 @@ node_modules/
 *.log
 .DS_Store
 Thumbs.db
+
+# Session notes written by the dsh-handoff-button plugin. They record a working
+# session, not the project, and change on every use.
+handoff/
+
+# Scratch builds produced by scripts/tabswitch-old.mjs.
+scripts/_build-old.js
+scripts/_tabswitch-old.mjs

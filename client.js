@@ -1167,7 +1167,12 @@ window.__ModuleLoader__.load({
         h('button', {
           type: 'button', className: 'dshk-work', onClick: () => onOpen(item), title: item.prompt,
         },
-          h('div', { className: 'im' }, h('img', { src: item.src, alt: shortOf(item.prompt, 40) })),
+          h('div', { className: 'im' }, h('img', {
+            // A page can hold 400 full-size PNGs; decoding every one of them up
+            // front is what made opening History slow. `lazy` defers the ones
+            // below the fold, and `async` keeps decoding off the main thread.
+            src: item.src, alt: shortOf(item.prompt, 40), loading: 'lazy', decoding: 'async',
+          })),
           h('div', { className: 'tt' }, shortOf(item.prompt, 18)),
           h('div', { className: 'mm' },
             `${whenOf(item.origin === 'preview' || item.deletedAt !== undefined ? item.deletedAt ?? item.at : item.at)}`
