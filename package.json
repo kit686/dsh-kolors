@@ -1,6 +1,6 @@
 {
   "name": "dsh-kolors",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Kolors image desk for DeepSeek Harness: a sidebar page that hard-locks the free Kwai-Kolors/Kolors model on SiliconFlow, keeps a local key pool with per-minute and per-day quotas, saves pictures to a folder you choose, and offers a history with a trash and a model tool.",
   "type": "module",
   "icon": "icon.svg",
@@ -23,7 +23,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "check": "node --check index.js && node --check client.js && node scripts/selftest.mjs && node scripts/clientaudit.mjs && node scripts/pathcheck.mjs",
+    "check": "node --check index.js && node --check client.js && node scripts/selftest.mjs && node scripts/clientaudit.mjs && node scripts/tabswitch.mjs && node scripts/pathcheck.mjs",
     "check:live": "node scripts/livecheck.mjs",
     "check:tool": "node scripts/toolschema.mjs"
   },

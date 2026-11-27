@@ -199,5 +199,34 @@ check('a blocked clipboard shows the path to copy by hand', /className: 'dshk-zo
 const zoomPathButtons = [...source.matchAll(/'zoom\.copyPath'/g)].length
 check('both lightboxes offer the copy action', zoomPathButtons >= 2, `${zoomPathButtons}`)
 
+console.log('\n[background job]')
+// The generation job must not belong to the tab body. Switching tabs unmounts
+// that body; if the request and its result live in its useState, the picture is
+// written to disk, the allowance is spent, and the page never learns about
+// either — the exact "generating stops when I click elsewhere" report.
+check('the job lives outside the component tree', /const STAGE = \{/.test(source))
+check('progress is published through one setter', /function stageSet\(patch, silent = false\) \{[\s\S]*?Object\.assign\(STAGE, patch\)/.test(source))
+check('the tab body subscribes to it', /function useStage\(\)/.test(source) && /const stage = useStage\(\)/.test(source))
+check('the request is not awaited by the tab body', /async function runGenerate\(request\)/.test(source) && /const generate = \(\) => \{[\s\S]*?runGenerate\(/.test(source))
+// A body must be able to disappear mid-flight without breaking the job: the
+// completion callbacks are optional and guarded.
+check('the page callbacks are optional', /hooks: \{ onQuota: undefined, onDone: undefined \}/.test(source) && /STAGE\.hooks\.onQuota !== undefined\) STAGE\.hooks\.onQuota/.test(source))
+check('the result is not per-tab useState any more', !/const \[result, setResult\] = React\.useState/.test(source))
+check('the tab body only reads the frame', /const result = stage\.result/.test(source))
+// A rejected generate must not be lost either: it is reported on whichever body
+// is mounted next, not on the one that happened to start it.
+check('the failure survives the unmount too', /error: failure\.message, errorStatus/.test(source) && /const error = stage\.error/.test(source))
+// The seed box is part of the job draft for the same reason.
+check('the seed draft lives outside the tab too', /seed: ''/.test(source) && /const seedText = stage\.seed/.test(source))
+// Finishing while the user is on another tab must be visible, or the picture
+// arrives silently.
+check('a frame that lands unseen is flagged', /unseen: STAGE\.viewing !== true/.test(source))
+check('mounting the tab clears the flag', /stageSet\(\{ viewing: true, unseen: false \}\)/.test(source))
+check('the tab strip says a job is running', /stage\.busy\s*\?\s*h\('span', \{ className: 'dshk-ring mini'/.test(source))
+check('the tab strip says a frame is waiting', /stage\.unseen\b/.test(source) && /className: 'dshk-dot'/.test(source))
+// A frame restored from the Host belongs to one boot; a new process means the
+// file was retired into the trash, so the stale pointer is replaced, not kept.
+check('a held frame is retired on a new boot id', /STAGE\.boot !== boot/.test(source))
+
 console.log(`\n${pass} passed, ${fail} failed\n`)
 process.exitCode = fail === 0 ? 0 : 1

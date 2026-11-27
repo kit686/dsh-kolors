@@ -34,6 +34,8 @@ window.__ModuleLoader__.load({
         title: 'Kolors 生图',
         subtitle: '硅基流动免费模型，每分钟 2 张、每天 400 张',
         'tab.generate': '生图', 'tab.history': '历史', 'tab.settings': '设置',
+        'tab.unseen': '新图已经出好了，切回生图页看',
+        'browse.detached': '已切到别的页面，出图照常进行，回来就能看到。',
         'quota.minute': '本分钟剩 {n} 张', 'quota.day': '今日剩 {n} 张',
         'quota.none': '额度已用完', 'quota.pool': '{k} 个 Key',
         'state.reading': '读取中…', 'state.offline': '连不上本地服务',
@@ -113,6 +115,8 @@ window.__ModuleLoader__.load({
         title: 'Kolors image desk',
         subtitle: 'Free SiliconFlow model — 2 a minute, 400 a day',
         'tab.generate': 'Generate', 'tab.history': 'History', 'tab.settings': 'Settings',
+        'tab.unseen': 'Your picture is ready — switch back to Generate',
+        'browse.detached': 'You moved to another page; the picture keeps cooking and will be here when you come back.',
         'quota.minute': '{n} left this minute', 'quota.day': '{n} left today',
         'quota.none': 'Out of allowance', 'quota.pool': '{k} keys',
         'state.reading': 'Loading…', 'state.offline': 'Local service unreachable',
@@ -430,6 +434,14 @@ window.__ModuleLoader__.load({
 @keyframes dshk-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .dshk-ring { animation: none; } }
 
+/* A job that is still running, or a finished frame waiting on a tab the user
+   is not looking at: the tab strip has to say so, or the work is invisible. */
+.dshk-ring.mini { width: 11px; height: 11px; border-width: 1.5px; display: inline-block; margin-left: 6px; vertical-align: -1px; }
+.dshk-dot {
+  display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-left: 6px; vertical-align: 1px;
+  background: var(--dsw-alias-brand-primary, #0f1115);
+}
+
 .dshk-stagefoot { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
 .dshk-stagefoot .spacer { flex: 1; }
 .dshk-meta { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--dsw-alias-label-tertiary, #81858c); font-variant-numeric: tabular-nums; }
@@ -746,27 +758,150 @@ window.__ModuleLoader__.load({
 
     /* ------------------------------------------------------------ generate */
 
+    /**
+     * The generation job, and the frame it produces, outlive the tab body that
+     * started them.
+     *
+     * Switching to another tab unmounts that body. The request itself is only a
+     * promise, so it kept running and the Host kept working — but `setBusy` and
+     * `setResult` arriving afterwards landed on an unmounted component and were
+     * dropped. The picture was written to disk, the allowance was spent, and the
+     * page never learned about either: the spinner vanished, the frame never
+     * appeared, and the quota meter stayed stale. That is the "generation gets
+     * interrupted when I click elsewhere" bug, and it is a state-ownership bug,
+     * not a network one.
+     *
+     * So the job lives here at module scope, where an unmount cannot reach it:
+     * the fetch runs to completion, the record is written to STAGE, and whichever
+     * body is mounted next reads the same record. Nothing ever aborts a request
+     * in flight; the only thing that stops a generation is the Host.
+     */
+    const STAGE = {
+      busy: false,
+      error: null,
+      errorStatus: 0,
+      // The unsaved frame on the table, or null. Survives a tab switch, a panel
+      // switch, and a remount; the Host's own `lastPreview` pointer covers a
+      // full reload.
+      result: null,
+      // The boot id the held frame belongs to. A frame from a previous Host
+      // process is a dead file, so a new boot id retires it instead of showing
+      // a broken image.
+      boot: '',
+      // Set when a frame lands while the generate tab is not on screen. The tab
+      // label carries a dot so a finished job cannot go unnoticed, and mounting
+      // the tab clears it.
+      unseen: false,
+      // Whether the generate tab is mounted right now; a completion reads this
+      // to decide if the frame is news.
+      viewing: false,
+      // The seed box is a draft that belongs to the job, not to the tab body:
+      // a tab switch must not quietly drop a seed the user typed in.
+      seed: '',
+      // Filled in by the page while it is mounted. A completion that lands after
+      // the last unmount updates nothing, and the fresh mount reads the frame
+      // back from the Host instead — which is why these are optional.
+      hooks: { onQuota: undefined, onDone: undefined },
+      listeners: new Set(),
+    }
+
+    /**
+     * Write STAGE and repaint whoever is subscribed.
+     *
+     * `silent` is for a write nobody renders: on unmount the child's cleanup
+     * runs while the page above it is being torn down too, and waking a listener
+     * that is on its way out buys nothing.
+     */
+    function stageSet(patch, silent = false) {
+      Object.assign(STAGE, patch)
+      if (silent) return
+      for (const listener of [...STAGE.listeners]) listener()
+    }
+
+    /** Re-render on every change to STAGE; the object identity never changes. */
+    function useStage() {
+      const [, bump] = React.useState(0)
+      React.useEffect(() => {
+        const listener = () => bump((count) => count + 1)
+        STAGE.listeners.add(listener)
+        return () => { STAGE.listeners.delete(listener) }
+      }, [])
+      return STAGE
+    }
+
+    /**
+     * One generation, started here rather than inside the tab body so a tab or
+     * panel switch cannot orphan it. Returns immediately; progress is in STAGE.
+     */
+    async function runGenerate(request) {
+      if (STAGE.busy) return
+      const previous = STAGE.result
+      stageSet({ busy: true, error: null, errorStatus: 0 })
+      try {
+        const seedText = String(request.seed ?? '').trim()
+        const body = await post('/generate', {
+          prompt: request.prompt,
+          size: request.params.size,
+          steps: request.params.steps,
+          guidance: request.params.guidance,
+          negative_prompt: request.params.negative,
+          seed: seedText === '' ? undefined : Number(seedText),
+          watermark: request.params.watermark,
+        })
+        // The old frame is dropped only after the new one landed, so a slow
+        // failure never costs the picture the user was already looking at. A
+        // filed frame is not thrown away: it already lives in the save folder
+        // and belongs to the history page now.
+        if (previous !== null && previous.filed !== true) {
+          post('/discard', { file: previous.file }).catch(() => {})
+        }
+        stageSet({
+          result: body.record,
+          boot: typeof body.record?.boot === 'string' ? body.record.boot : STAGE.boot,
+          // The frame is news only if nobody was looking at the stage when it
+          // landed; the tab that is on screen marks it seen on mount.
+          unseen: STAGE.viewing !== true,
+        })
+        if (body.quota !== undefined && STAGE.hooks.onQuota !== undefined) STAGE.hooks.onQuota(body.quota)
+        post('/settings', { params: request.params }).catch(() => {})
+        if (STAGE.hooks.onDone !== undefined) STAGE.hooks.onDone()
+      } catch (failure) {
+        stageSet({ error: failure.message, errorStatus: typeof failure.status === 'number' ? failure.status : 0 })
+      } finally {
+        stageSet({ busy: false })
+      }
+    }
+
     function GenerateTab({
-      state, onQuota, onSaved, onGoKey, onDownload, params, setParams, prompt, setPrompt,
-      seedDraft, result, setResult, onTrashChanged,
+      state, onSaved, onGoKey, onDownload, params, setParams, prompt, setPrompt,
+      onTrashChanged,
     }) {
-      const [busy, setBusy] = React.useState(false)
-      const [error, setError] = React.useState(null)
-      const [errorStatus, setErrorStatus] = React.useState(0)
+      const stage = useStage()
+      const busy = stage.busy
+      const result = stage.result
+      const error = stage.error
+      const errorStatus = stage.errorStatus
       const [saving, setSaving] = React.useState(false)
       const [notice, setNotice] = React.useState('')
       const [zoom, setZoom] = React.useState(null)
-      const [seedText, setSeedText] = React.useState('')
+      // The seed box is not component state: a tab switch unmounts this body,
+      // and a seed the user typed in must not come back empty. Same reason the
+      // frame and the job live in STAGE.
+      const seedText = stage.seed
+      const setSeedText = (value) => stageSet({ seed: value })
       // "Already filed" is a property of the frame itself, not of this component:
       // a tab switch remounts this body, and the button must still read 已保存.
       const saved = result !== null && result.filed === true
 
-      // "Reuse settings" on the history tab hands the seed down; adopt it once,
-      // including when the reused picture had no seed at all.
+      /**
+       * This body owns the "someone is looking at the stage" flag. It is how a
+       * completion knows whether the new frame is news, and it clears the dot
+       * the tab shows while the user is elsewhere.
+       */
       React.useEffect(() => {
-        if (seedDraft === null || seedDraft === undefined) return
-        setSeedText(String(seedDraft))
-      }, [seedDraft])
+        stageSet({ viewing: true, unseen: false })
+        return () => { stageSet({ viewing: false }, true) }
+      }, [])
 
       const sizes = Array.isArray(state?.sizes) && state.sizes.length > 0 ? state.sizes : SIZE_FALLBACK
       const dayLeft = state?.quota?.dayLeft
@@ -778,46 +913,19 @@ window.__ModuleLoader__.load({
       const loaded = state !== null
       const blocked = loaded && dayLeft <= 0
 
-      const generate = async () => {
+      // Nothing here awaits the request: the job is in runGenerate, which keeps
+      // running after this body is unmounted. All this does is hand it the
+      // current draft.
+      const generate = () => {
         if (busy || prompt.trim() === '') return
-        const previous = result
-        setBusy(true)
-        setError(null)
-        setErrorStatus(0)
         setNotice('')
-        try {
-          const body = await post('/generate', {
-            prompt,
-            size: params.size,
-            steps: params.steps,
-            guidance: params.guidance,
-            negative_prompt: params.negative,
-            seed: seedText.trim() === '' ? undefined : Number(seedText.trim()),
-            watermark: params.watermark,
-          })
-          // The old frame is dropped only after the new one landed, so a slow
-          // failure never costs the picture the user was already looking at. A
-          // filed frame is not thrown away: it already lives in the save folder
-          // and belongs to the history page now.
-          if (previous !== null && previous.filed !== true) {
-            post('/discard', { file: previous.file }).catch(() => {})
-          }
-          setResult(body.record)
-          if (body.quota !== undefined) onQuota(body.quota)
-          post('/settings', { params }).catch(() => {})
-        } catch (failure) {
-          setError(failure.message)
-          setErrorStatus(typeof failure.status === 'number' ? failure.status : 0)
-        } finally {
-          setBusy(false)
-        }
+        runGenerate({ prompt, params, seed: seedText })
       }
 
       const save = async () => {
         if (result === null || saved || saving) return
         setSaving(true)
-        setError(null)
-        setErrorStatus(0)
+        stageSet({ error: null, errorStatus: 0 })
         try {
           const body = await post('/save', {
             file: result.file,
@@ -836,19 +944,20 @@ window.__ModuleLoader__.load({
           // rides on the frame itself, so a tab switch keeps 已保存 visible.
           const filed = body?.saved
           if (filed !== undefined && typeof filed.src === 'string') {
-            setResult({
-              ...result,
-              id: filed.id,
-              src: filed.src,
-              path: filed.path,
-              name: filed.name,
-              filed: true,
+            stageSet({
+              result: {
+                ...result,
+                id: filed.id,
+                src: filed.src,
+                path: filed.path,
+                name: filed.name,
+                filed: true,
+              },
             })
           }
           onSaved()
         } catch (failure) {
-          setError(failure.message)
-          setErrorStatus(typeof failure.status === 'number' ? failure.status : 0)
+          stageSet({ error: failure.message, errorStatus: typeof failure.status === 'number' ? failure.status : 0 })
         } finally {
           setSaving(false)
         }
@@ -878,7 +987,7 @@ window.__ModuleLoader__.load({
         } catch {
           /* the frame goes away either way */
         }
-        setResult(null)
+        stageSet({ result: null })
         onTrashChanged()
         setNotice(t('delete.done'))
         window.setTimeout(() => setNotice(''), 2400)
@@ -973,18 +1082,18 @@ window.__ModuleLoader__.load({
           onClick: generate,
         }, busy ? t('generate.running') : result !== null ? t('generate.again') : t('generate')))
 
-      let stage
+      let stageBody
       if (busy) {
-        stage = h('div', { className: 'dshk-spin' },
+        stageBody = h('div', { className: 'dshk-spin' },
           h('span', { className: 'dshk-ring' }),
           h('span', null, t('browse.busy')))
       } else if (result !== null) {
-        stage = h('button', {
+        stageBody = h('button', {
           type: 'button', className: 'dshk-work', style: { display: 'block', width: '100%' },
           onClick: () => setZoom(result), title: t('zoom.open'),
         }, h('img', { src: result.src, alt: result.prompt, style: { maxHeight: 560, maxWidth: '100%', margin: '0 auto' } }))
       } else {
-        stage = h('div', { className: 'dshk-emptystage' },
+        stageBody = h('div', { className: 'dshk-emptystage' },
           h('b', null, t('browse.empty')),
           t('browse.empty.body'))
       }
@@ -1030,7 +1139,7 @@ window.__ModuleLoader__.load({
         h('div', null,
           h('div', { className: 'dshk-card' },
             h('h2', null, t('section.browse')),
-            h('div', { className: 'dshk-stage' }, stage),
+            h('div', { className: 'dshk-stage' }, stageBody),
             foot,
             notice === '' ? null : h('p', { className: 'dshk-note', 'data-tone': 'ok' }, notice),
             errorBox,
@@ -1574,15 +1683,14 @@ window.__ModuleLoader__.load({
       const [items, setItems] = React.useState([])
       const [historyTotal, setHistoryTotal] = React.useState(undefined)
       const [historyTruncated, setHistoryTruncated] = React.useState(false)
-      const [reuseSeed, setReuseSeed] = React.useState(null)
       const [offline, setOffline] = React.useState(false)
       const [days, setDays] = React.useState(null)
       const [windows, setWindows] = React.useState([1, 3, 7, 30, 0])
       const [trashItems, setTrashItems] = React.useState([])
       const [trashTotal, setTrashTotal] = React.useState(0)
-      // The unsaved frame lives here, not inside the tab body: switching tabs
-      // unmounts that body, and a picture must not disappear with it.
-      const [result, setResult] = React.useState(null)
+      // The unsaved frame and the job that produces it live in STAGE, outside
+      // this component tree: switching tabs or panels unmounts bodies, and
+      // neither a running request nor the picture it produces may die with them.
       const [notice, setNotice] = React.useState('')
       const [prompt, setPrompt] = React.useState('')
       const [params, setParamsState] = React.useState({ ...DEFAULT_PARAMS })
@@ -1608,8 +1716,15 @@ window.__ModuleLoader__.load({
           if (next?.limits?.windows !== undefined) setWindows(next.limits.windows)
           setDays((current) => (current === null ? next?.limits?.historyDays ?? 7 : current))
           // The Host is the authority on the unsaved frame: it survives a tab
-          // switch and a reload, and a new process simply reports none.
-          setResult((current) => (current === null ? next?.preview ?? null : current))
+          // switch and a reload, and a new process simply reports none. A frame
+          // this page already holds is newer than the one on disk — a running
+          // job finishes into STAGE, so it must not be overwritten here.
+          const boot = typeof next?.boot === 'string' ? next.boot : ''
+          if (STAGE.result === null || (STAGE.boot !== '' && STAGE.boot !== boot)) {
+            // A new boot id means the frame in hand names a file the retiring
+            // pass already moved to the trash, so it is replaced, not kept.
+            stageSet({ result: next?.preview ?? null, boot })
+          }
           // Adopt once per page load. The draft is stamped with the boot id it
           // was written under, so "same run, keep typing" and "the app was
           // restarted, start clean" are told apart without a timer.
@@ -1689,6 +1804,22 @@ window.__ModuleLoader__.load({
         if (live === 0) setTab('settings')
       }, [state])
 
+      /**
+       * Let the background job reach this page while it is mounted. The job
+       * outlives the tab body, so the only way its completion can move the
+       * quota meters or refresh the history list is through here — and the
+       * callbacks are optional, because a completion that lands while nobody is
+       * mounted is normal and must not throw.
+       */
+      React.useEffect(() => {
+        STAGE.hooks.onQuota = (next) => setState((current) => (current === null ? current : { ...current, quota: next }))
+        STAGE.hooks.onDone = () => { reloadAll() }
+        return () => {
+          STAGE.hooks.onQuota = undefined
+          STAGE.hooks.onDone = undefined
+        }
+      }, [reloadAll])
+
       const reveal = (path) => {
         if (typeof path !== 'string' || path === '') return
         post('/reveal', { path }).then(() => {
@@ -1740,8 +1871,10 @@ window.__ModuleLoader__.load({
           watermark: item.watermark === true,
         })
         // The seed is what makes a re-run reproducible; without it "reuse"
-        // would quietly produce a different picture.
-        setReuseSeed(item.seed === null || item.seed === undefined ? '' : String(item.seed))
+        // would quietly produce a different picture. It is written straight into
+        // STAGE — the seed box reads from there — so a later tab switch cannot
+        // hand back a stale value.
+        stageSet({ seed: item.seed === null || item.seed === undefined ? '' : String(item.seed) })
         setTab('generate')
       }
 
@@ -1761,12 +1894,24 @@ window.__ModuleLoader__.load({
                 h(Meter, { label: t('quota.day', { n: quota.dayLeft }), low: quota.dayLeft <= 10 }),
                 h('span', { className: 'dshk-meter' }, t('quota.pool', { k: keyCount })))))
 
+      // The page also watches STAGE so the tab strip can show that a job is
+      // running — or that a finished frame is waiting on a tab the user is not
+      // looking at. Without this the work happens invisibly.
+      const stage = useStage()
+
       const tabs = h('div', { className: 'dshk-tabs', role: 'tablist' }, ['generate', 'history', 'settings'].map((id) =>
         h('button', {
           key: id, type: 'button', className: 'dshk-tab', role: 'tab',
           'aria-selected': String(tab === id),
           'data-on': String(tab === id), onClick: () => setTab(id),
-        }, t(`tab.${id}`))))
+        },
+          t(`tab.${id}`),
+          id === 'generate' && stage.busy
+            ? h('span', { className: 'dshk-ring mini', title: t('browse.detached'), 'aria-label': t('browse.detached') })
+            : null,
+          id === 'generate' && !stage.busy && stage.unseen
+            ? h('span', { className: 'dshk-dot', title: t('tab.unseen'), 'aria-label': t('tab.unseen') })
+            : null)))
 
       let body
       if (tab === 'history') {
@@ -1785,10 +1930,8 @@ window.__ModuleLoader__.load({
         body = h(KeyTab, { state, onRefresh: reloadAll, onReveal: reveal })
       } else {
         body = h(GenerateTab, {
-          state, params, setParams, prompt, setPrompt, seedDraft: reuseSeed,
-          result, setResult,
+          state, params, setParams, prompt, setPrompt,
           onGoKey: () => setTab('settings'),
-          onQuota: (next) => setState((current) => (current === null ? current : { ...current, quota: next })),
           onSaved: () => { reloadAll() },
           onTrashChanged: () => { loadTrash() },
           onDownload: download,
