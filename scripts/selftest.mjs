@@ -6,8 +6,8 @@
  * Run with: node scripts/selftest.mjs
  */
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { homedir, tmpdir } from 'node:os'
+import { dirname, isAbsolute, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const home = mkdtempSync(join(tmpdir(), 'kolors-home-'))
@@ -110,7 +110,13 @@ console.log('\n[state — empty profile]')
   const first = await call('GET', '/state')
   check('state answers 200', first.status === 200, first.status)
   check('no keys yet', first.body.keys.length === 0)
-  check('default output dir is the user Pictures folder', first.body.outputDir.endsWith('Pictures'), first.body.outputDir)
+  // The default is `~/Pictures` when that folder exists, and the home directory
+  // otherwise — a CI runner has no Pictures folder, and the plugin must not
+  // invent one. Either answer is correct as long as it is a real directory.
+  check('the default output dir exists and is absolute', isAbsolute(first.body.outputDir) && existsSync(first.body.outputDir), first.body.outputDir)
+  check('the default falls back to home when Pictures is absent',
+    first.body.outputDir.endsWith('Pictures') ? existsSync(first.body.outputDir) : first.body.outputDir === homedir(),
+    first.body.outputDir)
   check('save folder is dsh-kolors-image', first.body.folder.endsWith('dsh-kolors-image'), first.body.folder)
   check('five canvas options ship', first.body.sizes.length === 5 && SIZES.length === 5)
   check('an empty pool leaves no allowance', first.body.quota.dayLeft === 0, first.body.quota.dayLeft)
@@ -568,16 +574,21 @@ console.log('\n[image streaming]')
 
 console.log('\n[output folder fallback]')
 {
-  // ~/Pictures is a Windows/macOS convention. On a box without it the plugin must
-  // not invent one; it falls back to the home directory, which always exists.
-  const previous = process.env.HOME
-  const bare = mkdtempSync(join(tmpdir(), 'kolors-bare-'))
-  writeFileSync(join(home, 'dsh-kolors.json'), JSON.stringify({ outputDir: '' }))
+  // ~/Pictures is a Windows/macOS convention. On a Linux box it does not exist
+  // and the plugin must not invent it: XDG next, then the home directory.
+  // The real `homedir()` cannot be redirected, so the rule is evaluated directly.
+  const source = readFileSync(join(import.meta.dirname, '..', 'index.js'), 'utf8')
+  const body = source.match(/function outputDirOf[\s\S]*?\n\}/)[0]
+  const withEnv = (exists, dir) => new Function('homedir', 'existsSync', 'join', 'process',
+    `${body}\nreturn outputDirOf;`)(() => dir, exists, join, { env: { XDG_PICTURES_DIR: join(dir, 'xdg-pics') } })
+  check('Pictures wins when it exists', withEnv((p) => p === join('/h', 'Pictures'), '/h')({ outputDir: '' }) === join('/h', 'Pictures'))
+  check('XDG is used when Pictures is absent', withEnv((p) => p === join('/h', 'xdg-pics'), '/h')({ outputDir: '' }) === join('/h', 'xdg-pics'))
+  check('home is the last resort', withEnv(() => false, '/h')({ outputDir: '' }) === '/h')
+  check('an explicit folder always wins', withEnv(() => true, '/h')({ outputDir: '/explicit' }) === '/explicit')
+
+  // Whatever it picks must be a directory that is really there.
   const state = await call('GET', '/state')
-  check('an empty setting still yields a usable folder', typeof state.body.outputDir === 'string' && state.body.outputDir !== '', state.body.outputDir)
-  check('the folder it names actually exists', existsSync(state.body.outputDir), state.body.outputDir)
-  rmSync(bare, { recursive: true, force: true })
-  if (previous !== undefined) process.env.HOME = previous
+  check('the folder it reports exists', existsSync(state.body.outputDir), state.body.outputDir)
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`)
