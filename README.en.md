@@ -12,7 +12,13 @@ A sidebar plugin for DeepSeek Harness: draw pictures with the free `Kwai-Kolors/
 dsh plugin add dsh-kolors
 ```
 
-Or add it to a profile's dependencies, or paste the package name into **Plugins → Add plugin** inside DSH. The model is fixed at `Kwai-Kolors/Kolors`; there is no model picker.
+To skip npm, install straight from GitHub (requires `git` on the machine):
+
+```bash
+dsh plugin add github:kit686/dsh-kolors#v0.3.0
+```
+
+Both routes ship the same code. Or add it to a profile's dependencies, or paste the package name into **Plugins → Add plugin** inside DSH. The model is fixed at `Kwai-Kolors/Kolors`; there is no model picker.
 
 Once installed, **Kolors Image** appears in the left sidebar. Open the Settings tab first and paste a [SiliconFlow](https://cloud.siliconflow.cn/) API key.
 

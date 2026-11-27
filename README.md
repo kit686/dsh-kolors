@@ -12,7 +12,13 @@ DeepSeek Harness 侧栏插件：用硅基流动免费的 `Kwai-Kolors/Kolors` �
 dsh plugin add dsh-kolors
 ```
 
-也可以直接写进 profile 的依赖，或在 DSH 的 **Plugins → Add plugin** 里粘贴包名。模型固定为 `Kwai-Kolors/Kolors`，没有模型选择项。
+不想走 npm 也可以直接从 GitHub 装（需要本机能 `git clone`）：
+
+```bash
+dsh plugin add github:kit686/dsh-kolors#v0.3.0
+```
+
+两种装法拿到的是同一份代码。也可以直接写进 profile 的依赖，或在 DSH 的 **Plugins → Add plugin** 里粘贴包名。模型固定为 `Kwai-Kolors/Kolors`，没有模型选择项。
 
 装好后左侧栏会出现「Kolors生图」，第一次打开先到**设置页**粘一个[硅基流动](https://cloud.siliconflow.cn/)的 API Key。
 
